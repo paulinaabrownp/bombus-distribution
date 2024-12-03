@@ -1,0 +1,396 @@
+---
+title: Analyzing and Predicting Bombus Latreille’s Distribution Across North America
+  Using Hierarchical Bayesian Models
+author: "Paulina Brown"
+date: "2024-09-20"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# Load packages
+library(bayesrules)
+library(tidyverse)
+library(rstanarm)
+library(bayesplot)
+library(tidybayes)
+library(broom.mixed)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+
+# Load data
+species_data <- read.csv("/Users/paulinabrownp/Desktop/Research Project/BombusLatreille.csv")
+temperature_data <- read.csv("/Users/paulinabrownp/Desktop/Research Project/averagetemperature.csv")
+plant_data <- read.csv("/Users/paulinabrownp/Desktop/Research Project/Monarda.csv")
+```
+
+# Data Preprocessing
+## Preprocess Temperature Data
+```{r}
+temperature_data <- rename(temperature_data, Month = Year)
+colnames(temperature_data) <- as.character(colnames(temperature_data))
+
+temperature_long <- pivot_longer(temperature_data, 
+                                 cols = matches("^X\\d{4}$"), 
+                                 names_to = "Year", 
+                                 values_to = "Temperature")
+
+# Convert 'Year' to numeric after stripping prefixes
+temperature_long$Year <- as.numeric(sub("^X", "", temperature_long$Year))
+
+# Filter for years 2013 to 2023
+temperature_filtered <- filter(temperature_long, Year >= 2013 & Year <= 2023)
+
+temperature_filtered$Year <- as.numeric(as.character(temperature_filtered$Year))
+
+# Remove rows with NAs in the Temperature column from temperature_filtered
+temperature_filtered <- temperature_filtered %>% filter(!is.na(Temperature))
+
+# Map 'Code' from CAN, MEX, USA to CA, MX, US
+country_code_map <- c(CAN = "CA", MEX = "MX", USA = "US")
+temperature_filtered$countryCode <- country_code_map[temperature_filtered$Code]
+
+# Filter temperature data for North American countries
+north_american_countries <- c("US", "CA", "MX")
+temperature_filtered <- temperature_filtered %>%
+  filter(countryCode %in% north_american_countries)
+```
+
+## Preprocess Species Data
+```{r}
+species_data <- rename(species_data, Year = year)
+colnames(species_data) <- as.character(colnames(species_data))
+
+species_filtered <- species_data %>%
+  mutate(Year = as.numeric(year(ymd_hms(dateIdentified)))) %>%
+  filter(Year >= 2013 & Year <= 2023) %>%
+  filter(!is.na(stateProvince) & stateProvince != "") %>%
+  mutate(Presence = ifelse(occurrenceStatus == "PRESENT", 1, 0))
+```
+
+## Preprocess Plant Data
+```{r}
+plant_data <- rename(plant_data, Year = year)
+colnames(plant_data) <- as.character(colnames(plant_data))
+
+plant_filtered <- plant_data %>%
+  mutate(Year = as.numeric(year(ymd_hms(dateIdentified)))) %>%
+  filter(Year >= 2013 & Year <= 2023) %>%
+  filter(!is.na(stateProvince) & stateProvince != "") %>%
+  mutate(Presence = ifelse(occurrenceStatus == "PRESENT", 1, 0))
+```
+
+# Data Agreggation and Merging
+```{r}
+# Aggregate temperature data by year
+temperature_aggregated <- temperature_filtered %>%
+  group_by(Year, countryCode) %>%
+  summarise(Temperature = mean(Temperature, na.rm = TRUE))
+
+# Aggregate plant data by Year and stateProvince
+plant_aggregated <- plant_filtered %>%
+  group_by(Year, stateProvince) %>%
+  summarise(PlantCount = n(), .groups = 'drop')
+
+# Merge temperature and species data
+species_temperature <- left_join(species_filtered, temperature_aggregated, by = c("Year", "countryCode"))
+
+# Merge temperature and plant data
+plant_temperature <- left_join(plant_filtered, temperature_aggregated, by = c("Year", "countryCode"))
+
+species_count_data <- species_temperature %>%
+  group_by(stateProvince, Year) %>%
+  summarise(
+    SpeciesCount = sum(Presence, na.rm = TRUE),
+    Temperature = mean(Temperature, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+plant_count_data <- plant_temperature %>%
+  group_by(stateProvince, Year) %>%
+  summarise(
+    PlantCount = sum(Presence, na.rm = TRUE),
+    Temperature = mean(Temperature, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Convert stateProvince to UTF-8 encoding. 
+plant_count_data$stateProvince <- iconv(plant_count_data$stateProvince, from = "Windows-1252", to = "UTF-8")
+# Manually correct the remaining misencoded names
+plant_count_data$stateProvince <- gsub("Michoac‡n", "Michoacán", plant_count_data$stateProvince)
+plant_count_data$stateProvince <- gsub("Nuevo Le—n", "Nuevo León", plant_count_data$stateProvince)
+plant_count_data$stateProvince <- gsub("QuŽbec", "Québec", plant_count_data$stateProvince)
+```
+# Exploratory Data Analysis
+```{r}
+# Exploring Temperature distribution across years
+ggplot(temperature_aggregated, aes(x = Year, y = Temperature)) +
+  geom_line(group=1, color="blue") +
+  geom_point(color="red") +
+  labs(title = "Average Temperature Over Time", x = "Year", y = "Temperature")
+
+# Species count over time
+ggplot(species_count_data, aes(x = Year, y = SpeciesCount)) +
+  geom_line(group=1, color="green") +
+  geom_point(color="darkgreen") +
+  labs(title = "Species Count Over Time", x = "Year", y = "Species Count")
+
+# Plant count over time
+ggplot(plant_count_data, aes(x = Year, y = PlantCount)) +
+  geom_line(group=1, color="mediumorchid") +
+  geom_point(color= "darkmagenta") +
+  labs(title = "Plant Count Over Time", x = "Year", y = "Plant Count")
+
+# Relationship between Temperature and Species Count
+ggplot(species_count_data, aes(x = Temperature, y = SpeciesCount)) +
+  geom_point() +
+  geom_smooth(method = "loess", color = "red") +
+  labs(title = "Temperature vs Species Count", x = "Temperature", y = "Species Count")
+
+# Relationship between Temperature and Plant Count
+ggplot(plant_count_data, aes(x = Temperature, y = PlantCount)) +
+  geom_point() +
+  geom_smooth(method = "loess", color = "blue") +
+  labs(title = "Temperature vs Plant Count", x = "Temperature", y = "Plant Count")
+```
+# Model Development: Hierarchical Bayesian Model
+## Poisson Models
+```{r}
+# Hierarchical Model for Species Count
+species_model <- stan_glmer(
+  SpeciesCount ~ Temperature + (1 | stateProvince/Year),
+  data = species_count_data,
+  family = poisson(link = "log"),  # Assuming count data follows a Poisson distribution
+  prior = normal(0, 1, autoscale = TRUE),  # Normal priors for the coefficients
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+# Hierarchical Model for Plant Count
+plant_model <- stan_glmer(
+  PlantCount ~ Temperature + (1 | stateProvince/Year),
+  data = plant_count_data,
+  family = poisson(link = "log"),  # Assuming count data follows a Poisson distribution
+  prior = normal(0, 1, autoscale = TRUE),  # Normal priors for the coefficients
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+```
+
+## Negative Binomial Models
+```{r}
+# Adjusting Species Count Model to Negative Binomial
+species_model_nb <- stan_glmer(
+  SpeciesCount ~ Temperature + (1 | stateProvince/Year),
+  data = species_count_data,
+  family = neg_binomial_2(link = "log"),
+  prior = normal(0, 1, autoscale = TRUE),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+# Adjusting Plant Count Model to Negative Binomial
+plant_model_nb <- stan_glmer(
+  PlantCount ~ Temperature + (1 | stateProvince/Year),
+  data = plant_count_data,
+  family = neg_binomial_2(link = "log"),
+  prior = normal(0, 1, autoscale = TRUE),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+```
+
+# Posterior Predictive Checks
+```{r}
+# Posterior predictive check for the Species Count Model
+ppc_species <- pp_check(species_model_nb, nsamples = 100, type = "hist") + 
+  ggtitle("Posterior Predictive Check for Species Count Model")
+
+# Posterior predictive check for the Plant Count Model
+ppc_plant <- pp_check(plant_model_nb, nsamples = 100, type = "hist") + 
+  ggtitle("Posterior Predictive Check for Plant Count Model")
+
+# Print the plots to visualize them
+print(ppc_species)
+print(ppc_plant)
+
+# Posterior predictive check for the adjusted Species Count Model
+ppc_species_nb <- pp_check(species_model_nb, nsamples = 100, type = "hist") + 
+  ggtitle("Posterior Predictive Check for Adjusted Species Count Model")
+
+# Posterior predictive check for the adjusted Plant Count Model
+ppc_plant_nb <- pp_check(plant_model_nb, nsamples = 100, type = "hist") + 
+  ggtitle("Posterior Predictive Check for Adjusted Plant Count Model")
+
+# Print the plots
+print(ppc_species_nb)
+print(ppc_plant_nb)
+```
+
+# Implementing Log Transformation to stabilize and normalize distribution
+```{r}
+# Adding a small constant and applying log transformation
+species_count_data$LogSpeciesCount <- log(species_count_data$SpeciesCount + 1)
+plant_count_data$LogPlantCount <- log(plant_count_data$PlantCount + 1)
+
+
+# Hierarchical Model for Log-Transformed Species Count
+species_model_log <- stan_glmer(
+  LogSpeciesCount ~ Temperature + (1 | stateProvince/Year),
+  data = species_count_data,
+  family = gaussian(),  # Using Gaussian family for the transformed counts
+  prior = normal(0, 1, autoscale = TRUE),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+# Hierarchical Model for Log-Transformed Plant Count
+plant_model_log <- stan_glmer(
+  LogPlantCount ~ Temperature + (1 | stateProvince/Year),
+  data = plant_count_data,
+  family = gaussian(),
+  prior = normal(0, 1, autoscale = TRUE),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+# Posterior predictive check for the log-transformed Species Count Model
+ppc_species_log <- pp_check(species_model_log, nsamples = 100, type = "hist") + 
+  ggtitle("Posterior Predictive Check for Log-Transformed Species Count Model")
+
+# Posterior predictive check for the log-transformed Plant Count Model
+ppc_plant_log <- pp_check(plant_model_log, nsamples = 100, type = "hist") + 
+  ggtitle("Posterior Predictive Check for Log-Transformed Plant Count Model")
+
+# Print the plots
+print(ppc_species_log)
+print(ppc_plant_log)
+```
+
+# Predictions and Visualizations
+```{r}
+# Split data into training and validation sets (70% train, 30% test)
+set.seed(123)  # for reproducibility
+training_indices <- sample(1:nrow(species_data), 0.7 * nrow(species_data))
+species_train <- species_count_data[training_indices, ]
+species_test <- species_count_data[-training_indices, ]
+
+# Fit hierarchical model on training data
+species_model <- stan_glmer(
+  SpeciesCount ~ Temperature + (1 | stateProvince/Year),
+  data = species_train,
+  family = poisson(link = "log"),
+  prior = normal(0, 1, autoscale = TRUE),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+```
+
+# Prediction and Performance Analysis
+```{r}
+# Residual Analysis and Diagnostics
+# Calculate residuals manually
+species_residuals <- residuals(species_model, type = "response")  # Response residuals
+species_fitted <- fitted(species_model)  # Fitted values
+
+# Create a residuals vs. fitted values plot
+ggplot(data = NULL, aes(x = species_fitted, y = species_residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Fitted Values",
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme_minimal()
+
+# Check for normality of residuals using a histogram
+ggplot(data = NULL, aes(x = species_residuals)) +
+  geom_histogram(bins = 30, fill = "blue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Histogram of Residuals",
+       x = "Residuals",
+       y = "Density") +
+  theme_minimal()
+
+# Optional: Perform a Q-Q plot for residuals
+qqnorm(species_residuals, main = "Q-Q Plot of Residuals")
+qqline(species_residuals, col = "red")
+
+# Convergence Diagnostics
+# Trace plots for parameters
+posterior <- as.array(species_model)
+mcmc_trace(posterior, pars = c("(Intercept)", "Temperature"), 
+           facet_args = list(labeller = label_parsed)) +
+  labs(title = "Trace Plots for Species Model Parameters")
+
+# Calculate R-hat values
+# Access R-hat values directly using rhat() function
+species_rhat <- rhat(species_model)  # Extract R-hat values for all parameters
+print(species_rhat)
+
+# Posterior Predictive Checks
+pp_check(species_model, type = "dens_overlay") +
+  ggtitle("Posterior Predictive Check for Species Count Model")
+
+# Predictive Performance Evaluation
+# Predict on the test dataset (if available)
+species_test <- species_count_data  # Replace with your actual test dataset
+predictions <- posterior_predict(species_model, newdata = species_test)
+
+# Summarize predictions (e.g., take the mean of posterior draws for each observation)
+species_test$predicted_counts <- apply(predictions, 2, mean)  # Column-wise mean
+
+# Compare predictions to actual values
+ggplot(species_test, aes(x = predicted_counts, y = SpeciesCount)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, col = "red") +  # Perfect fit line
+  labs(title = "Predicted vs Actual Species Count",
+       x = "Predicted Species Count",
+       y = "Actual Species Count") +
+  theme_minimal()
+
+# Simple example of 5-fold cross-validation
+cv_errors <- numeric(5)
+folds <- cut(seq(1, nrow(species_count_data)), breaks = 5, labels = FALSE)
+
+for(i in 1:5) {
+  test_indices <- which(folds == i)
+  train_indices <- setdiff(seq(1, nrow(species_count_data)), test_indices)
+  model <- stan_glmer(
+    SpeciesCount ~ Temperature + (1 | stateProvince/Year),
+    data = species_count_data[train_indices, ],
+    family = poisson(link = "log"),
+    prior = normal(0, 1, autoscale = TRUE),
+    chains = 4,
+    iter = 2000,
+    seed = 123
+  )
+  predictions <- posterior_predict(model, newdata = species_count_data[test_indices, ])
+  cv_errors[i] <- sqrt(mean((rowMeans(predictions) - species_count_data$SpeciesCount[test_indices])^2))  # RMSE
+}
+
+mean(cv_errors)  # Average RMSE over all folds
+
+# Generate a final visualization
+ggplot(species_count_data, aes(x = Year, y = SpeciesCount)) +
+  geom_line(aes(group = stateProvince), color = "blue") +
+  geom_point(aes(color = stateProvince)) +
+  labs(title = "Species Count Over Time by Province",
+       x = "Year",
+       y = "Species Count") +
+  theme_minimal()
+```
